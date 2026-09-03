@@ -1,0 +1,163 @@
+name: CI / CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Форматирование, линтер и типы
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Получить код
+        uses: actions/checkout@v6
+
+      - name: Настроить Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Установить зависимости
+        run: npm ci
+
+      - name: Проверить форматирование
+        run: npm run format:check
+
+      - name: Запустить линтер
+        run: npm run lint
+
+      - name: Проверить типы
+        run: npm run typecheck
+
+  unit:
+    name: Unit-тесты
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Получить код
+        uses: actions/checkout@v6
+
+      - name: Настроить Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Установить зависимости
+        run: npm ci
+
+      - name: Запустить unit-тесты с покрытием
+        run: npm run test:coverage
+
+  e2e:
+    name: Playwright E2E
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Получить код
+        uses: actions/checkout@v6
+
+      - name: Настроить Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Установить зависимости
+        run: npm ci
+
+      - name: Установить Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Запустить E2E-тесты
+        run: npm run test:e2e
+
+      - name: Сохранить отчёт Playwright
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 14
+
+  build:
+    name: Production-сборка
+    needs: [quality, unit, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Получить код
+        uses: actions/checkout@v6
+
+      - name: Настроить Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Установить зависимости
+        run: npm ci
+
+      - name: Настроить GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Определить базовый путь
+        shell: bash
+        run: |
+          if [[ "${{ github.event.repository.name }}" == "${{ github.repository_owner }}.github.io" ]]; then
+            echo "PAGES_BASE_PATH=" >> "$GITHUB_ENV"
+          else
+            echo "PAGES_BASE_PATH=/${{ github.event.repository.name }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Собрать статический сайт
+        run: npm run build
+
+      - name: Подготовить артефакт
+        shell: bash
+        run: |
+          mkdir -p pages-dist
+          if [[ -z "$PAGES_BASE_PATH" ]]; then
+            cp -R dist/client/. pages-dist/
+          else
+            cp -R "dist/client${PAGES_BASE_PATH}/." pages-dist/
+          fi
+          test -f pages-dist/index.html
+
+      - name: Загрузить артефакт Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: pages-dist
+
+  deploy:
+    name: Публикация в GitHub Pages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Опубликовать
+        id: deployment
+        uses: actions/deploy-pages@v4
